@@ -1,69 +1,147 @@
-import Image from "next/image";
+import { getCurrentAccount } from "@/lib/auth";
+import {
+  fetchRecentlyPlayed,
+  fetchTopArtists,
+  fetchTopTracks,
+  getValidAccessToken,
+  type TimeRange,
+} from "@/lib/spotify";
 
-export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+const TIME_RANGES: { value: TimeRange; label: string }[] = [
+  { value: "short_term", label: "Last 4 weeks" },
+  { value: "medium_term", label: "Last 6 months" },
+  { value: "long_term", label: "All time" },
+];
+
+function isTimeRange(value: string | string[] | undefined): value is TimeRange {
+  return TIME_RANGES.some((r) => r.value === value);
+}
+
+const ERROR_MESSAGES: Record<string, string> = {
+  invalid_state:
+    "Login request didn't match. Make sure you opened the app at http://127.0.0.1:3000 (not localhost), then try again.",
+  unauthorized_account: "That Spotify account isn't the owner account for this app.",
+  account_save_failed: "Couldn't save your Spotify account. Check the server logs.",
+  access_denied: "You declined the Spotify permission request.",
+};
+
+export default async function Home({ searchParams }: PageProps<"/">) {
+  const account = await getCurrentAccount();
+  const params = await searchParams;
+
+  if (!account) {
+    const error = typeof params.error === "string" ? params.error : undefined;
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-zinc-50 px-6 text-center dark:bg-black">
+        {error && (
+          <p className="max-w-md text-sm text-red-600 dark:text-red-400">
+            {ERROR_MESSAGES[error] ?? `Login failed: ${error}`}
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
+        )}
+        <a
+          href="/api/auth/login"
+          className="rounded-full bg-[#1DB954] px-6 py-3 font-medium text-black"
+        >
+          Log in with Spotify
+        </a>
+      </div>
+    );
+  }
+
+  const timeRange: TimeRange = isTimeRange(params.range) ? params.range : "medium_term";
+
+  const accessToken = await getValidAccessToken(account);
+  const [topArtists, topTracks, recentlyPlayed] = await Promise.all([
+    fetchTopArtists(accessToken, timeRange),
+    fetchTopTracks(accessToken, timeRange),
+    fetchRecentlyPlayed(accessToken),
+  ]);
+
+  return (
+    <div className="min-h-screen bg-zinc-50 px-6 py-10 dark:bg-black dark:text-zinc-50">
+      <div className="mx-auto flex max-w-4xl flex-col gap-10">
+        <header className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">
+            {account.display_name ?? "Your"} Spotify stats
+          </h1>
+          <a href="/api/auth/logout" className="text-sm text-zinc-500 hover:underline">
+            Log out
           </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+        </header>
+
+        <nav className="flex gap-2">
+          {TIME_RANGES.map((r) => (
+            <a
+              key={r.value}
+              href={`/?range=${r.value}`}
+              className={`rounded-full px-4 py-1.5 text-sm ${
+                r.value === timeRange
+                  ? "bg-black text-white dark:bg-white dark:text-black"
+                  : "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              }`}
+            >
+              {r.label}
+            </a>
+          ))}
+        </nav>
+
+        <section>
+          <h2 className="mb-3 text-lg font-medium">Top artists</h2>
+          <ol className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {topArtists.map((artist, i) => (
+              <li key={artist.id} className="flex flex-col items-center gap-2 text-center">
+                <span className="text-xs text-zinc-500">#{i + 1}</span>
+                {artist.images[0] && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={artist.images[0].url}
+                    alt={artist.name}
+                    className="h-24 w-24 rounded-full object-cover"
+                  />
+                )}
+                <span className="text-sm font-medium">{artist.name}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section>
+          <h2 className="mb-3 text-lg font-medium">Top tracks</h2>
+          <ol className="flex flex-col gap-2">
+            {topTracks.map((track, i) => (
+              <li key={track.id} className="flex items-center gap-3">
+                <span className="w-5 text-xs text-zinc-500">{i + 1}</span>
+                {track.album.images[0] && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={track.album.images[0].url} alt={track.album.name} className="h-10 w-10" />
+                )}
+                <div>
+                  <p className="text-sm font-medium">{track.name}</p>
+                  <p className="text-xs text-zinc-500">
+                    {track.artists.map((a) => a.name).join(", ")}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section>
+          <h2 className="mb-3 text-lg font-medium">Recently played</h2>
+          <ol className="flex flex-col gap-2">
+            {recentlyPlayed.map((item, i) => (
+              <li key={`${item.track.id}-${item.played_at}-${i}`} className="flex items-center justify-between text-sm">
+                <span>
+                  {item.track.name} — {item.track.artists.map((a) => a.name).join(", ")}
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {new Date(item.played_at).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      </div>
     </div>
   );
 }
