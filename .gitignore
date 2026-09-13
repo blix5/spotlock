@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# MediaPipe assets - restored by `npm run setup:assets`, not committed.
+# The wasm/ files are a straight copy of node_modules/@mediapipe/tasks-vision/wasm
+# (34MB) and the model is a 3.6MB download; both are reproducible, so neither
+# belongs in git. They're served from public/ rather than a CDN so inference
+# still works offline once fetched.
+/public/models/
+/public/mediapipe/

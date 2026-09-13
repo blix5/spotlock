@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { getCurrentAccount } from "@/lib/auth";
 import {
   fetchRecentlyPlayed,
@@ -64,9 +66,14 @@ export default async function Home({ searchParams }: PageProps<"/">) {
           <h1 className="text-2xl font-semibold">
             {account.display_name ?? "Your"} Spotify stats
           </h1>
-          <a href="/api/auth/logout" className="text-sm text-zinc-500 hover:underline">
-            Log out
-          </a>
+          <div className="flex items-center gap-4">
+            <Link href="/focus" className="text-sm text-zinc-500 hover:underline">
+              Focus tracking
+            </Link>
+            <a href="/api/auth/logout" className="text-sm text-zinc-500 hover:underline">
+              Log out
+            </a>
+          </div>
         </header>
 
         <nav className="flex gap-2">

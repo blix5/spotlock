@@ -9,6 +9,10 @@ export const SPOTIFY_SCOPES = [
   "user-read-email",
   "user-top-read",
   "user-read-recently-played",
+  // Added for focus tracking (docs/cv-plan.md §5). Changing this list forces
+  // a re-auth of the owner account, so settle it in one pass.
+  "user-read-playback-state",
+  "user-read-currently-playing",
 ].join(" ");
 
 export function getAuthorizeUrl(state: string): string {
@@ -142,4 +146,32 @@ export async function fetchTopTracks(accessToken: string, timeRange: TimeRange =
 export async function fetchRecentlyPlayed(accessToken: string) {
   const data = await spotifyFetch(accessToken, `/me/player/recently-played?limit=50`);
   return data.items as RecentlyPlayedItem[];
+}
+
+export type CurrentlyPlaying = {
+  is_playing: boolean;
+  progress_ms: number | null;
+  item: SpotifyTrack | null;
+};
+
+// Deliberately not routed through spotifyFetch: this endpoint returns
+// 204 No Content when nothing is playing, and res.json() on an empty body
+// throws even though res.ok is true. Null here means "nothing playing",
+// which is a normal state for focus tracking, not an error.
+export async function fetchCurrentlyPlaying(accessToken: string): Promise<CurrentlyPlaying | null> {
+  const res = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (res.status === 204) return null;
+  if (!res.ok) {
+    throw new Error(`Spotify currently-playing failed: ${res.status} ${await res.text()}`);
+  }
+
+  const data = await res.json();
+  // Spotify also returns 200 with a null item for some non-track contexts
+  // (podcast episodes, local files), which we treat the same as silence.
+  if (!data?.item?.id) return null;
+
+  return { is_playing: !!data.is_playing, progress_ms: data.progress_ms ?? null, item: data.item };
 }
