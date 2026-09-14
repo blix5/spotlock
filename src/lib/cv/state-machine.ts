@@ -1,10 +1,32 @@
-import type { AttentionState, AttentionTransition, RawSample } from "./types";
+import { ZERO_BASELINE } from "./types";
+import type { AttentionState, AttentionTransition, GazeBaseline, RawSample } from "./types";
+
+/**
+ * Gaze thresholds for one measurement source. Blendshape scores and iris
+ * offsets measure the same thing on completely unrelated scales - roughly
+ * 0..1 against a fraction of eye width - so they cannot share numbers. One
+ * set each, so the fallback path still actually fires.
+ */
+export type GazeThresholds = {
+  /** Baseline-relative eye-down that reads as gaze_down on its own. */
+  down: number;
+  /** Lower bar, which only counts when the head has dipped too. */
+  downSoft: number;
+  /** Baseline-relative |horizontal| that reads as looking_away. */
+  side: number;
+};
 
 export type StateMachineConfig = {
   /** |yaw| beyond this reads as looking away, in degrees. */
   yawThresholdDeg: number;
-  /** pitch below this reads as gaze_down, in degrees (negative = head down). */
+  /** pitch below this reads as gaze_down on head pose alone, in degrees. */
   pitchDownThresholdDeg: number;
+  /**
+   * The much smaller head dip that pairs with eyes-down, in degrees. Looking
+   * at a phone on the desk is mostly an eye movement with a dip well short
+   * of pitchDownThresholdDeg, so neither signal crosses its own bar alone.
+   */
+  pitchSoftDownDeg: number;
   /** Blendshape closed-ness above this counts as a closed eye. */
   blinkScoreThreshold: number;
   /** EAR below this counts as a closed eye. Used when blendshapes are absent. */
@@ -15,6 +37,17 @@ export type StateMachineConfig = {
    * as closed eyes and eventually as sleeping.
    */
   asleepMaxYawDeg: number;
+  /**
+   * Beyond this |yaw| the eye signals are too foreshortened to trust, so
+   * gaze is ignored and classification falls back to head pose alone. Same
+   * reasoning as asleepMaxYawDeg, and deliberately a touch tighter: gaze is
+   * a finer measurement off the same foreshortened landmarks.
+   */
+  gazeMaxYawDeg: number;
+  /** Thresholds for the eyeLook* blendshapes, the preferred source. */
+  blendshapeGaze: GazeThresholds;
+  /** Thresholds for the iris-offset fallback. */
+  irisGaze: GazeThresholds;
   /** Consecutive samples of a candidate state required to commit to it. */
   enter: Record<AttentionState, number>;
 };
@@ -25,9 +58,15 @@ export type StateMachineConfig = {
 export const DEFAULT_CONFIG: StateMachineConfig = {
   yawThresholdDeg: 25,
   pitchDownThresholdDeg: -20,
+  pitchSoftDownDeg: -8,
   blinkScoreThreshold: 0.5,
   earThreshold: 0.18,
   asleepMaxYawDeg: 35,
+  gazeMaxYawDeg: 30,
+  blendshapeGaze: { down: 0.35, downSoft: 0.2, side: 0.35 },
+  // An order of magnitude smaller because the unit is a fraction of eye
+  // width, not a 0..1 score. Tune against the `iris` row of the readout.
+  irisGaze: { down: 0.06, downSoft: 0.035, side: 0.06 },
   enter: {
     // Asymmetric on purpose: slow to leave focused, fast to return. One bad
     // sample (a stretch, a sip of coffee) shouldn't register as distraction,
@@ -49,8 +88,40 @@ function eyesClosed(sample: RawSample, cfg: StateMachineConfig): boolean {
   return false;
 }
 
+/**
+ * Baseline-corrected gaze, with the thresholds that go with whichever source
+ * produced it. Prefers the blendshapes and falls back to iris geometry,
+ * exactly as eyesClosed() prefers blinkScore over ear. Null means neither
+ * source was available and the caller should use head pose alone.
+ */
+function resolveGaze(
+  sample: RawSample,
+  cfg: StateMachineConfig,
+  baseline: GazeBaseline
+): { vertical: number; horizontal: number; t: GazeThresholds } | null {
+  if (sample.gazeVertical !== null && sample.gazeHorizontal !== null) {
+    return {
+      vertical: sample.gazeVertical - baseline.gazeVertical,
+      horizontal: sample.gazeHorizontal - baseline.gazeHorizontal,
+      t: cfg.blendshapeGaze,
+    };
+  }
+  if (sample.irisVertical !== null && sample.irisHorizontal !== null) {
+    return {
+      vertical: sample.irisVertical - baseline.irisVertical,
+      horizontal: sample.irisHorizontal - baseline.irisHorizontal,
+      t: cfg.irisGaze,
+    };
+  }
+  return null;
+}
+
 /** Classify a single sample, before any debouncing. */
-export function classify(sample: RawSample, cfg: StateMachineConfig): AttentionState {
+export function classify(
+  sample: RawSample,
+  cfg: StateMachineConfig,
+  baseline: GazeBaseline = ZERO_BASELINE
+): AttentionState {
   if (!sample.facePresent) return "absent";
 
   const yaw = sample.yaw ?? 0;
@@ -60,7 +131,23 @@ export function classify(sample: RawSample, cfg: StateMachineConfig): AttentionS
   // suppressed at extreme yaw where the eye landmarks aren't trustworthy.
   if (eyesClosed(sample, cfg) && Math.abs(yaw) < cfg.asleepMaxYawDeg) return "asleep";
 
+  const gaze = Math.abs(yaw) < cfg.gazeMaxYawDeg ? resolveGaze(sample, cfg, baseline) : null;
+
+  if (gaze) {
+    if (gaze.vertical > gaze.t.down) return "gaze_down";
+    // The case head pitch alone misses, and the reason gaze is here at all:
+    // glancing at a phone is a small dip *plus* eyes down, with neither
+    // crossing its own threshold.
+    if (pitch - baseline.pitch < cfg.pitchSoftDownDeg && gaze.vertical > gaze.t.downSoft) {
+      return "gaze_down";
+    }
+  }
+
+  // Head pose is still checked unconditionally, so behaviour degrades to
+  // what it was before gaze existed if the eye signals ever go missing.
   if (pitch < cfg.pitchDownThresholdDeg) return "gaze_down";
+
+  if (gaze && Math.abs(gaze.horizontal) > gaze.t.side) return "looking_away";
   if (Math.abs(yaw) > cfg.yawThresholdDeg) return "looking_away";
 
   return "focused";
@@ -77,15 +164,23 @@ export class AttentionStateMachine {
   private candidateCount = 0;
   private samplesInCurrentCount = 0;
 
-  constructor(private cfg: StateMachineConfig = DEFAULT_CONFIG) {}
+  constructor(
+    private cfg: StateMachineConfig = DEFAULT_CONFIG,
+    private baseline: GazeBaseline = ZERO_BASELINE
+  ) {}
 
   get state(): AttentionState | null {
     return this.current;
   }
 
+  /** Swap in a freshly measured baseline without restarting the session. */
+  setBaseline(baseline: GazeBaseline) {
+    this.baseline = baseline;
+  }
+
   /** Feed one sample. Returns a transition if this sample caused one. */
   push(sample: RawSample): AttentionTransition | null {
-    const candidate = classify(sample, this.cfg);
+    const candidate = classify(sample, this.cfg, this.baseline);
 
     if (candidate === this.current) {
       this.candidate = null;

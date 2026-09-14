@@ -1,9 +1,11 @@
 # spotifything
 
 A single-user tool that measures how focused you are while working and correlates it
-against what Spotify is playing. A webcam classifies attention state once a second, a small
-macOS helper reports which app is frontmost, and both are lined up against playback history
-to answer the actual question: **which music keeps me focused.**
+against what Spotify is playing. A webcam classifies attention state once a second and that
+is lined up against playback history to answer the actual question: **which music keeps me
+focused.**
+
+Everything runs in the browser. Nothing is installed and nothing else runs on the machine.
 
 Design rationale and the reasoning behind each decision live in [docs/cv-plan.md](docs/cv-plan.md).
 
@@ -56,17 +58,12 @@ Two migrations: `spotify_accounts` (OAuth tokens) and the focus-tracking tables.
 
 ## Running
 
-Two processes:
-
 ```bash
 npm run dev
 ```
 
-```bash
-node helper/focus-helper.js
-```
-
-Then open **http://127.0.0.1:3000/focus** and click *Start capture*.
+Then open **http://127.0.0.1:3000/focus**, click *Start capture*, and click *Calibrate*
+once while looking at the centre of the screen.
 
 > ### Use `127.0.0.1`, never `localhost`
 >
@@ -79,44 +76,61 @@ Then open **http://127.0.0.1:3000/focus** and click *Start capture*.
 > `allowedDevOrigins: ["127.0.0.1"]` in [next.config.ts](next.config.ts) is what makes this
 > work. Don't remove it.
 
-The helper is optional — without it the app records attention and playback, and the `helper`
-status dot stays grey. That's a normal state, not an error.
-
 ### Things that look like errors but aren't
 
 - `INFO: Created TensorFlow Lite XNNPACK delegate for CPU.` — an informational log MediaPipe
   writes via `console.error`, which Next's dev overlay promotes to an error card. Harmless,
   and absent from production builds.
-- The `helper` dot staying grey — see above.
 
 ---
 
 ## How it works
 
-Three **independent** interval streams, deliberately not correlated on write. They change at
+Two **independent** interval streams, deliberately not correlated on write. They change at
 unrelated rates, so joining them on the way in would let a track change spuriously split an
 attention interval. They're joined by time overlap at query time instead.
 
 | Stream | Source | Table |
 |---|---|---|
 | Attention | webcam, 1 fps | `attention_intervals` |
-| App | macOS helper, 1 Hz | `app_intervals` |
 | Playback | Spotify poll, 30s | `playback_intervals` |
 
-All three are scoped to a row in `capture_sessions`, which records when capture was actually
-running — without it, "away from the computer" and "app wasn't open" are indistinguishable,
-and every focus percentage would be inflated.
+Both are scoped to a row in `capture_sessions`, which records when capture was actually
+running — without it, "away from the computer" and "nothing was recorded" are
+indistinguishable, and every focus percentage would be inflated.
 
 **Attention states:** `focused`, `looking_away`, `gaze_down`, `absent`, `asleep`. A state
 machine debounces raw per-sample classifications with asymmetric hysteresis — slow to leave
 `focused`, fast to return — so one stretch or sip of coffee isn't recorded as distraction.
 
-`gaze_down` deliberately conflates phone, keyboard, and desk. Head pitch alone can't separate
-them, and doing so would need a second object-detection model for one event type.
+`gaze_down` and `looking_away` read **the eyes, not just the head**. The `eyeLook*`
+blendshapes give eye rotation relative to the head, which is exactly the component head pose
+cannot see — glancing at a phone is mostly an eye movement with a head dip far too small to
+cross a pitch threshold. Head pose is still checked unconditionally, so classification
+degrades to head-only if the eye signals ever go missing. Iris landmarks (this is the
+478-point refined mesh) provide the same measurement geometrically, as a fallback and a
+cross-check.
+
+`gaze_down` still deliberately conflates phone, keyboard, and desk. Separating them needs a
+second object-detection model for the sake of one event type.
 
 **At 1 fps, blink *rate* is not detectable** — blinks last 100–400ms and alias away. Sleep
 detection works because it uses sustained eye closure (10 consecutive samples), not blink
-frequency.
+frequency. Gaze is subject to the same limit: saccades alias away too, so what is measured
+is sustained gaze direction, which is what the states are about anyway.
+
+### Why there is no app tracking
+
+Earlier versions recorded which app was frontmost, via a small macOS helper process polling
+`osascript` over a localhost WebSocket. That was removed so this can be a website you just
+open.
+
+A browser page **cannot** see which application is frontmost — `getDisplayMedia` returns
+pixels and nothing else, no window title, no app identity, deliberately, as a privacy
+boundary. A local helper was the only way to get it, and browsers block `ws://` from an
+`https://` page, so it could never have survived being hosted. Nothing browser-only
+substitutes for it: the Idle Detection API gives idle/locked but not app identity, and an
+extension is still an install.
 
 ---
 
@@ -133,53 +147,49 @@ src/
       intervals/route.ts         Opens/closes interval rows for all three streams
       playback/route.ts          Server-side Spotify proxy (token never reaches browser)
   components/
-    FocusCapture.tsx             The client island: camera loop, helper, polling, debug UI
+    FocusCapture.tsx             The client island: camera loop, calibration, polling, debug UI
   lib/
     cv/
       detector.ts                MediaPipe FaceLandmarker setup, memoised
-      signals.ts                 Landmarks -> yaw/pitch/roll, EAR, blink score
+      signals.ts                 Landmarks -> yaw/pitch/roll, gaze, iris, EAR, blink score
       state-machine.ts           Debounced attention states + tuning thresholds
+      calibration.ts             Resting-gaze baseline: measure, persist, restore
       types.ts
     focus/
       recorder.ts                Interval open/close lifecycle
-      helper-client.ts           WebSocket client for the macOS helper
-      categories.ts              bundle id -> productive/distracting/neutral
     spotify.ts                   OAuth, token refresh, API calls
     supabase-admin.ts            Service-role client (server-only)
     session.ts / auth.ts         HMAC session cookie
-helper/
-  focus-helper.js                Reports frontmost macOS app over localhost WebSocket
 ```
-
-### Why a helper process exists
-
-A browser page **cannot** see which application is frontmost. `getDisplayMedia` returns
-pixels and nothing else — no window title, no app identity — deliberately, as a privacy
-boundary. So screen capture can't answer "am I in Slack right now", and a 50-line local
-helper can, with no vision involved at all.
-
-Bundle id and app name need no macOS permission. Window titles need Accessibility, which is
-why `window_title` is nullable and unused by default.
-
-This ties capture to local development: browsers block `ws://` from an `https://` page, so a
-TLS deploy would need a different transport.
 
 ---
 
 ## Tuning
 
 Thresholds in [src/lib/cv/state-machine.ts](src/lib/cv/state-machine.ts) are starting points.
-Head pose is relative to where the laptop sits, so values tuned at a desk will be wrong on a
-couch.
+Head pose and resting gaze are both relative to where the laptop sits, so values tuned at a
+desk will be wrong on a couch.
 
-The debug readout on `/focus` shows live `yaw`, `pitch`, `roll`, `blink` and `ear` alongside
-the committed state and what's pending. Watch it while you move:
+*Calibrate* handles the resting point: three seconds at 10 Hz looking at the centre of the
+screen, median-filtered so a blink doesn't skew it, stored in `localStorage` and subtracted
+before any threshold is applied. It's worth redoing when you move the machine. Uncalibrated
+sessions still classify — the baseline just defaults to zeros.
+
+The debug readout on `/focus` shows live `yaw`, `pitch`, `roll`, `blink`, `ear`, `gaze v/h`,
+`iris v/h` and the active `baseline` alongside the committed state and what's pending. Watch
+it while you move:
 
 - Turn your head until `looking_away` fires — adjust `yawThresholdDeg`.
 - Look down; `gaze_down` should fire. (The raw matrix decomposition came out inverted, so
   `signals.ts` negates pitch. If it ever reads backwards again, that's the line.)
-- If `blink` shows `— (no blendshape)` rather than a number, the blendshape category names
-  in `signals.ts` don't match the model and `ear` is driving sleep detection instead.
+- Look down **with your eyes only**, head still; `gaze_down` should still fire. Adjust
+  `blendshapeGaze.down` — too low and reading the bottom of the screen trips it.
+- Check the gaze signs before trusting any of it: looking down should drive `gaze v` positive.
+  If it reads backwards, negate it in `signals.ts`, the way pitch already is.
+- `blendshapeGaze` and `irisGaze` have separate thresholds on purpose: one is a 0..1 score,
+  the other a fraction of eye width. They are not interchangeable numbers.
+- If `blink` or `gaze v/h` shows `—` rather than a number, the blendshape category names in
+  `signals.ts` don't match the model, and `ear` / `iris v/h` are driving classification.
 
 ---
 

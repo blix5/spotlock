@@ -15,9 +15,6 @@ const eslintConfig = defineConfig([
     // Vendored MediaPipe wasm glue, copied from node_modules and served
     // from public/ so inference works offline. Not ours to lint.
     "public/mediapipe/**",
-    // Plain CommonJS Node script, not part of the Next app - it runs
-    // outside the bundler and `require` is correct there.
-    "helper/**",
   ]),
 ]);
 

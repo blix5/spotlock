@@ -3,7 +3,6 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 const TABLES = {
   attention: "attention_intervals",
-  app: "app_intervals",
   playback: "playback_intervals",
 } as const;
 
@@ -18,7 +17,6 @@ function tableFor(stream: unknown): string | null {
 // let the client write any column in any of these tables.
 const FIELDS: Record<Stream, string[]> = {
   attention: ["state"],
-  app: ["bundle_id", "app_name", "window_title", "category"],
   playback: ["spotify_track_id", "track_name", "artist_names", "album_name", "start_progress_ms"],
 };
 

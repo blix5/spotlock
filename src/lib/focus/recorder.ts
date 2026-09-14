@@ -1,4 +1,4 @@
-export type Stream = "attention" | "app" | "playback";
+export type Stream = "attention" | "playback";
 
 /**
  * Owns the open/close lifecycle for one interval stream. Intervals are
@@ -17,7 +17,7 @@ export class IntervalRecorder {
 
   /**
    * Close whatever is open and open a new interval for `fields`. Pass null
-   * to just close (e.g. playback stopping, or the helper disconnecting).
+   * to just close (e.g. playback stopping).
    *
    * Calls are serialised through `inFlight` because a close needs the id
    * from its own open: at 1 fps two transitions can't realistically overlap,

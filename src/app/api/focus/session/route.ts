@@ -1,7 +1,7 @@
 import { getCurrentAccount } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
-const INTERVAL_TABLES = ["attention_intervals", "app_intervals", "playback_intervals"] as const;
+const INTERVAL_TABLES = ["attention_intervals", "playback_intervals"] as const;
 
 /**
  * Opens a capture session. Also closes anything the previous session left
@@ -39,7 +39,6 @@ export async function POST(request: Request) {
     .insert({
       account_id: account.id,
       camera_enabled: !!body.cameraEnabled,
-      helper_connected: !!body.helperConnected,
     })
     .select("id")
     .single();
@@ -48,18 +47,17 @@ export async function POST(request: Request) {
   return Response.json({ sessionId: data.id, closedOrphans: orphans?.length ?? 0 });
 }
 
-/** Updates connection flags mid-session, or ends the session. */
+/** Updates the camera flag mid-session, or ends the session. */
 export async function PATCH(request: Request) {
   const account = await getCurrentAccount();
   if (!account) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  const { sessionId, ended, cameraEnabled, helperConnected } = await request.json();
+  const { sessionId, ended, cameraEnabled } = await request.json();
   if (!sessionId) return Response.json({ error: "sessionId required" }, { status: 400 });
 
   const now = new Date().toISOString();
   const patch: Record<string, unknown> = {};
   if (typeof cameraEnabled === "boolean") patch.camera_enabled = cameraEnabled;
-  if (typeof helperConnected === "boolean") patch.helper_connected = helperConnected;
 
   if (ended) {
     patch.ended_at = now;

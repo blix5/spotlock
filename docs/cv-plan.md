@@ -140,6 +140,28 @@ before writing threshold logic. If blendshapes prove awkward, the fallback is a 
 eye-aspect-ratio over the eye landmark ring — a well-established technique, slightly more
 code, no model-version coupling.
 
+> **Settled, 2026-09-12.** The downloaded `face_landmarker.task` carries the full ARKit-52
+> set; `eyeBlinkLeft`/`eyeBlinkRight` are present, so the blendshape path is live and EAR is
+> a genuine fallback rather than the default. The same check found `eyeLookUp/Down/In/Out`,
+> which the table above missed — **eye rotation relative to the head**, i.e. precisely the
+> component head pose cannot see. It is also the 478-point refined mesh, so iris landmarks
+> (centres 468 and 473) give the same quantity geometrically.
+>
+> A fourth signal was added on that basis: **gaze**, signed vertical and horizontal, from
+> blendshapes with the iris offsets as fallback. `gaze_down` was the state this was meant to
+> fix — head pitch alone missed phone glances, which are mostly an eye movement with a dip
+> far too small to cross a −20° threshold, and raising that threshold would only have made
+> ordinary posture shifts fire instead. Head pose is still checked unconditionally, so
+> behaviour degrades to head-only if the eye signals ever go missing.
+>
+> Resting gaze is not zero — a laptop sits below eye line — so a measured per-machine
+> baseline is subtracted before thresholding. See `src/lib/cv/calibration.ts`. This is the
+> same problem the "tune against the live readout" note below describes for head pose;
+> calibration just automates the resting point rather than the thresholds.
+>
+> Gaze inherits the 1 fps limit exactly as blink rate does: saccades alias away, so what is
+> measured is sustained gaze direction.
+
 ### State machine
 
 Raw per-sample signals are too noisy to store directly. A state machine converts them into
@@ -167,6 +189,29 @@ misfire, and ten seconds of continuously closed eyes is a signal nothing else pr
 ---
 
 ## §3 App state via a local helper
+
+> **Superseded, 2026-09-12. The app stream was removed entirely; there is no helper.**
+>
+> The goal changed to "a website you open, with nothing running on the machine beside it",
+> and the app stream could not follow. The constraint that killed it is the one this section
+> already names below under *Constraint this introduces*: browsers block `ws://` from an
+> `https://` page, so a helper could never survive being hosted. That was written as a
+> caveat; it turned out to be the deciding factor.
+>
+> Nothing browser-only replaces it, and the reasoning under *Why not screen capture* is why:
+> app identity is a deliberate privacy boundary, not a gap to route around. The options
+> considered and rejected were the Idle Detection API (`IdleDetector`, Chromium-only and
+> permission-gated — gives idle/active and screen-locked, but never app identity), a browser
+> extension (tab-level identity, but still an install, which is the thing being removed), and
+> classifying `getDisplayMedia` frames with a vision model — the only real path to app
+> detection from a page, at the cost of a second model and a screen-share prompt. That last
+> one is the option to revisit if this ever matters again.
+>
+> Attention and playback were untouched. They are the two streams that answer the question in
+> the title, and neither needed the helper. What is lost is the app dimension of §7's
+> analysis — "distracting app open while focused" is no longer answerable.
+>
+> Everything below is kept as the original reasoning, not as a description of the code.
 
 ### Why not screen capture
 
@@ -270,8 +315,8 @@ wasn't running" look identical in an interval table. That ambiguity would silent
 every focus percentage ever computed, in the flattering direction. A session row records when
 capture was genuinely active, so analysis can scope to observed time.
 
-It also records whether the camera and helper were each connected — a session with the helper
-down should not be read as "never used a distracting app."
+It also records whether the camera was connected. (It recorded the same for the helper until
+the app stream was removed — see §3.)
 
 ---
 
@@ -302,6 +347,10 @@ list forces a re-auth and should only be decided once.
 ## §6 Schema
 
 Four tables, matching the existing migration's conventions.
+
+> **Amended, 2026-09-12.** Three tables now: `app_intervals` was dropped along with the
+> helper (§3), and `capture_sessions.helper_connected` with it. See the
+> `remove_app_tracking` migration. `focus_by_track()` never read either, so it was unchanged.
 
 ```sql
 -- One row per period where capture was actually running. Without this,
@@ -445,11 +494,14 @@ Genuinely open. The eye-tracking approach, the phone/gaze-down conflation, the s
 approach, and the sync-precision target are all **decided** above and shouldn't be reopened
 without a new reason.
 
-1. **EAR/blendshape and head-pose threshold *values*** still need empirical tuning against
-   the live debug readout — they depend on physical setup. (The pitch *sign* is settled: it
-   needed negating, and `signals.ts` does that now.)
-2. **Blendshape category names** in §2 are unverified against this version of
-   `@mediapipe/tasks-vision`. Log one real result before writing threshold logic.
+1. **EAR/blendshape, head-pose and gaze threshold *values*** still need empirical tuning
+   against the live debug readout — they depend on physical setup. (The pitch *sign* is
+   settled: it needed negating, and `signals.ts` does that now. The four gaze signs are
+   **not** settled and need the same live check.)
+2. ~~**Blendshape category names** in §2 are unverified against this version of
+   `@mediapipe/tasks-vision`.~~ **Closed 2026-09-12** — verified against the downloaded
+   model: the full ARKit-52 set is present, including the `eyeLook*` categories §2 originally
+   missed. See the note in §2.
 3. **`tstzrange` immutability** for the generated column (§6) — verify before applying the
    migration; fallback noted.
 4. **Spotify rate limits and the exact scope list** (§5) are unverified. Settle the final
@@ -503,21 +555,20 @@ directly.
 `user-read-currently-playing`. Existing tokens don't carry them, so log out and back in once
 or `/api/focus/playback` returns 403.
 
-Then, in two terminals:
+Then:
 
 ```
 npm run dev
-node helper/focus-helper.js
 ```
 
-Visit `/focus` and hit **Start capture**. The three status dots (camera / helper / spotify)
-show what's actually connected — the helper dot stays grey until `focus-helper.js` is
-running, and that's a normal state, not an error.
+Visit `/focus` and hit **Start capture**, then **Calibrate** once while looking at the centre
+of the screen. The two status dots (camera / spotify) show what's actually connected.
 
 ### Tuning the thresholds
 
 This is the part that can't be skipped. The debug readout shows live `yaw`, `pitch`, `roll`,
-`blink` and `ear` alongside the committed state and what's pending. Watch it while you move:
+`blink`, `ear`, `gaze v/h`, `iris v/h` and the active `baseline` alongside the committed state
+and what's pending. Watch it while you move:
 
 - Turn your head until `looking_away` fires. If that angle feels wrong, change
   `yawThresholdDeg` in `src/lib/cv/state-machine.ts`.
@@ -525,6 +576,13 @@ This is the part that can't be skipped. The debug readout shows live `yaw`, `pit
   inverted here (looking *up* triggered `gaze_down`), so `signals.ts` now negates pitch.
   That's been validated against a live camera — if it ever reads backwards again, that
   negation is the place to look.
+- Look down with your **eyes only**, head still; `gaze_down` should still fire. That's the
+  case head pitch alone missed and the reason gaze exists. `blendshapeGaze.down` is the knob;
+  too low and reading the bottom of the screen trips it.
+- Validate the gaze signs the same way pitch was: looking down should drive `gaze v` positive.
+  If it reads backwards, negate it in `signals.ts`, not at the threshold.
+- Redo **Calibrate** after moving the machine. The baseline is where the eyes rest looking at
+  the screen, and a laptop on a couch is nothing like one on a desk.
 - Check whether `blink` shows a number or `— (no blendshape)`. If it's the latter, the
   blendshape category names in `signals.ts` don't match this model version and the `ear`
   column is what's driving sleep detection.
