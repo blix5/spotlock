@@ -52,7 +52,8 @@ SESSION_SECRET=
 supabase db push
 ```
 
-Two migrations: `spotify_accounts` (OAuth tokens) and the focus-tracking tables.
+Three migrations: `spotify_accounts` (OAuth tokens), the focus-tracking tables, and the
+removal of the app-tracking table that went with the old helper.
 
 ---
 
@@ -144,7 +145,7 @@ src/
     api/auth/                    OAuth login, callback, logout
     api/focus/
       session/route.ts           Opens/closes capture sessions, sweeps orphans
-      intervals/route.ts         Opens/closes interval rows for all three streams
+      intervals/route.ts         Opens/closes interval rows for both streams
       playback/route.ts          Server-side Spotify proxy (token never reaches browser)
   components/
     FocusCapture.tsx             The client island: camera loop, calibration, polling, debug UI
